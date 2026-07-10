@@ -1,0 +1,62 @@
+ADC-Meta Research License (Non-Commercial, Citation Required)
+Copyright (c) 2026 Jianyong Zhu, Bingfei Zhou, Weifeng Xu, Hongtao Wang
+North China Electric Power University. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and associated documentation files (the "Software"),
+to use, copy, modify, merge, and distribute copies of the Software for
+ACADEMIC, RESEARCH, AND EDUCATIONAL PURPOSES ONLY, subject to the
+following conditions:
+
+1. CITATION REQUIREMENT
+
+   Any publication, technical report, presentation, dataset, or other
+   public disclosure of results, findings, or derivative works produced
+   using the Software, in whole or in part, must cite the following work:
+
+       J. Zhu, B. Zhou, W. Xu, and H. Wang, "Congestion-Aware DAG
+       Offloading in Cloud-Edge-End IoT Systems via Adaptive
+       Meta-Reinforcement Learning," IEEE Internet of Things Journal,
+       2026.
+
+   A machine-readable citation record is provided in CITATION.cff at the
+   root of this repository.
+
+2. NON-COMMERCIAL USE ONLY
+
+   The Software, and any work derived from it, may not be used, in whole
+   or in part, for any commercial purpose. Commercial purposes include,
+   without limitation: incorporation into a commercial product or paid
+   service; use in training, evaluating, or benchmarking systems offered
+   for sale; and use in any revenue-generating deployment. Any commercial
+   use requires prior written permission from the copyright holders
+   (Section 5).
+
+3. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE
+   LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN
+   ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN
+   CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+4. REDISTRIBUTION
+
+   Redistribution of the Software, or of any derivative work, must
+   retain this license file in its entirety, including the citation
+   requirement (Section 1), the non-commercial restriction (Section 2),
+   and the copyright notice above.
+
+5. COMMERCIAL LICENSING AND OTHER INQUIRIES
+
+   For commercial licensing, or for uses not covered by this license,
+   please contact the corresponding author:
+
+       Hongtao Wang
+       Department of Computer, North China Electric Power University
+       wanght@ncepu.edu.cn
+
+Last updated: July 2026

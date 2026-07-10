@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite both the software and the paper below."
+title: "ADC-Meta: Congestion-Aware DAG Offloading in Cloud-Edge-End IoT Systems via Adaptive Meta-Reinforcement Learning"
+type: software
+authors:
+  - family-names: "Zhu"
+    given-names: "Jianyong"
+    affiliation: "North China Electric Power University"
+  - family-names: "Zhou"
+    given-names: "Bingfei"
+    affiliation: "North China Electric Power University"
+  - family-names: "Xu"
+    given-names: "Weifeng"
+    affiliation: "North China Electric Power University"
+  - family-names: "Wang"
+    given-names: "Hongtao"
+    affiliation: "North China Electric Power University"
+repository-code: "https://github.com/sdt-mcs/ADC_meta"
+license: "LicenseRef-ADC-Meta-Research-License"
+date-released: "2026-07-01"
+preferred-citation:
+  type: article
+  title: "Congestion-Aware DAG Offloading in Cloud-Edge-End IoT Systems via Adaptive Meta-Reinforcement Learning"
+  authors:
+    - family-names: "Zhu"
+      given-names: "Jianyong"
+    - family-names: "Zhou"
+      given-names: "Bingfei"
+    - family-names: "Xu"
+      given-names: "Weifeng"
+    - family-names: "Wang"
+      given-names: "Hongtao"
+  journal: "IEEE Internet of Things Journal"
+  year: 2026
+  publisher:
+    name: "IEEE"
