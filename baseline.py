@@ -1,12 +1,22 @@
 """
-baseline.py — 对比基线算法
+baseline.py — 对比基线算法（异构多边缘版 / Heterogeneous Multi-Edge）
 
 实现了以下基线，用于论文中的性能对比实验：
   1. LocalOnly      — 全部本地执行
-  2. EdgeOnly       — 全部卸载到边缘
-  3. Greedy         — 贪心：每步选执行时间最短的 (task, location) 组合
+  2. EdgeOnly       — 全部卸载到边缘（在 E 个边中选 EFT 最小者）
+  3. Greedy         — 贪心：每步选 EFT（最早完成时间）最小的 (task, location)
   4. HEFT           — Heterogeneous Earliest Finish Time 经典启发式
   5. RandomPolicy   — 随机合法动作（用于下界参考）
+
+【v3 异构改动】
+  * HEFT._heft_exec 使用各边缘真实算力 f_edge[e] 与各回程真实带宽 rate_ec_max[e]。
+    口径划分（回复信 AE-2 依据）：
+      - 静态且已知的基础设施参数 → 用真值。HEFT 全称即 Heterogeneous EFT，
+        用平均值抹平异构性等于把基线打残，不是"公平的离线启发式"。
+      - 随机且离线不可观测的量（信道 rate_ue、回程队列 Q_ec）→ 用均值/零队列估计。
+  * EdgeOnly 从"选 node_avail 最小的边"改为"选 EFT 最小的边"：异构下算力差异
+    可达 3 倍，只看空闲时刻会系统性低估边缘层能力，构成稻草人基线。
+  * Greedy 无需改动：它调用 env._compute_task_exec_time，异构参数自动生效。
 """
 import numpy as np
 from typing import List, Dict, Optional
@@ -20,14 +30,12 @@ from config import Config
 # ─────────────────────────────────────────────────────────
 
 class BaselinePolicy:
-    """所有基线策略的基类"""
     name: str = "Base"
 
     def select_action(self, obs: Dict, env: ThreeTierEnv) -> int:
         raise NotImplementedError
 
     def run_episode(self, dag: DAG, env: ThreeTierEnv) -> float:
-        """运行一个完整 episode，返回最终 makespan"""
         obs = env.reset(dag)
         done = False
         while not done:
@@ -36,7 +44,6 @@ class BaselinePolicy:
         return info.get("final_makespan", 0.0)
 
     def evaluate(self, dags: List[DAG], env: ThreeTierEnv) -> Dict:
-        """在多个 DAG 上评估，返回统计结果"""
         makespans = [self.run_episode(dag, env) for dag in dags]
         return {
             "name": self.name,
@@ -53,31 +60,45 @@ class BaselinePolicy:
 # ─────────────────────────────────────────────────────────
 
 class LocalOnlyPolicy(BaselinePolicy):
-    """所有子任务全部本地执行（x_i=0）"""
     name = "LocalOnly"
 
     def select_action(self, obs: Dict, env: ThreeTierEnv) -> int:
         mask = obs["valid_mask"]
-        # 找到合法任务中第一个，选本地执行（action = i*3+0）
+        L = env.L
         for i in range(obs["N"]):
-            if mask[i * 3]:  # 本地执行动作
-                return i * 3
+            if mask[i * L + env.LOC_LOCAL]:
+                return i * L + env.LOC_LOCAL
         raise ValueError("No valid local action found")
 
 
 # ─────────────────────────────────────────────────────────
-#  2. 全边缘执行
+#  2. 全边缘执行（异构：在 E 个边中选 EFT 最小者）
 # ─────────────────────────────────────────────────────────
 
 class EdgeOnlyPolicy(BaselinePolicy):
-    """所有子任务全部卸载到边缘服务器（x_i=1）"""
     name = "EdgeOnly"
 
     def select_action(self, obs: Dict, env: ThreeTierEnv) -> int:
         mask = obs["valid_mask"]
+        L, E = env.L, env.E
+        st = env.state
+
         for i in range(obs["N"]):
-            if mask[i * 3 + 1]:  # 边缘执行动作
-                return i * 3 + 1
+            if not any(mask[i * L + (1 + e)] for e in range(E)):
+                continue
+            task = env.dag.tasks[i]
+            pred_ready = max((st.finish_times[p] for p in task.predecessors),
+                             default=0.0)
+            best_e, best_eft = 0, float("inf")
+            for e in range(E):
+                x = 1 + e
+                if not mask[i * L + x]:
+                    continue
+                exec_t = env._compute_task_exec_time(task, x)
+                eft = max(pred_ready, st.node_avail[x]) + exec_t
+                if eft < best_eft:
+                    best_eft, best_e = eft, e
+            return i * L + (1 + best_e)
         raise ValueError("No valid edge action found")
 
 
@@ -86,7 +107,6 @@ class EdgeOnlyPolicy(BaselinePolicy):
 # ─────────────────────────────────────────────────────────
 
 class RandomPolicy(BaselinePolicy):
-    """均匀随机从合法动作中选择"""
     name = "Random"
 
     def __init__(self, seed: int = 0):
@@ -98,32 +118,34 @@ class RandomPolicy(BaselinePolicy):
 
 
 # ─────────────────────────────────────────────────────────
-#  4. 贪心策略
+#  4. 贪心策略（EFT，论文定义）
 # ─────────────────────────────────────────────────────────
 
 class GreedyPolicy(BaselinePolicy):
     """
-    贪心：每步选择能最小化当前增量时延的 (task, location) 组合
-    即：argmin_{(i,x) 合法} T_i^x（子任务单独执行时延，不考虑全局最优）
+    贪心：每步选择能最小化该子任务 EFT（最早完成时间）的 (task, location)。
+    EFT = max(前驱就绪, 目标节点空闲) + 执行时延（用 env 实时状态，异构参数自动生效）。
     """
     name = "Greedy"
 
     def select_action(self, obs: Dict, env: ThreeTierEnv) -> int:
         mask = obs["valid_mask"]
-        N = obs["N"]
-        best_action = -1
-        best_time = float("inf")
+        N, L = obs["N"], env.L
+        st = env.state
+        best_action, best_eft = -1, float("inf")
 
         for i in range(N):
             task = env.dag.tasks[i]
-            for x in range(3):
-                a = i * 3 + x
+            pred_ready = max((st.finish_times[p] for p in task.predecessors),
+                             default=0.0)
+            for x in range(L):
+                a = i * L + x
                 if not mask[a]:
                     continue
-                t = env._compute_task_exec_time(task, x)
-                if t < best_time:
-                    best_time = t
-                    best_action = a
+                exec_t = env._compute_task_exec_time(task, x)
+                eft = max(pred_ready, st.node_avail[x]) + exec_t
+                if eft < best_eft:
+                    best_eft, best_action = eft, a
 
         return best_action
 
@@ -134,11 +156,14 @@ class GreedyPolicy(BaselinePolicy):
 
 class HEFTPolicy(BaselinePolicy):
     """
-    HEFT 启发式算法（经典基线）
-    步骤：
-      1. 为每个子任务计算 upward rank（考虑三个位置的平均执行时延）
+    HEFT 启发式（经典离线基线）
+      1. 为每个子任务计算 upward rank（L 个位置执行时延的平均）
       2. 按 rank 降序确定调度顺序
-      3. 每个子任务选择 EFT（Earliest Finish Time）最小的位置
+      3. 每个子任务选择 EFT 最小的位置（在全部 L 个位置上比较）
+
+    参数口径（AE-2）：
+      * 静态已知的异构基础设施参数 f_edge[e] / rate_ec_max[e] → 用真值
+      * 随机且离线不可观测的 rate_ue / Q_ec → 用均值、零队列估计
     """
     name = "HEFT"
 
@@ -146,7 +171,7 @@ class HEFTPolicy(BaselinePolicy):
         self.cfg = cfg
         self._priority_order: Optional[List[int]] = None
         self._priority_ptr: int = 0
-    
+
     def run_episode(self, dag: DAG, env: ThreeTierEnv) -> float:
         obs = env.reset(dag)
         self._priority_order = self._compute_priority(dag, env)
@@ -157,81 +182,70 @@ class HEFTPolicy(BaselinePolicy):
             obs, _, done, info = env.step(action)
         return info.get("final_makespan", 0.0)
 
+    def _heft_exec(self, task, x: int, env: ThreeTierEnv) -> float:
+        """某位置的离线执行时延估计（见类文档的参数口径说明）"""
+        ec = self.cfg.env
+        st = env.state
+        avg_rate_ue = float(np.mean(list(ec.rate_ue_options)))
+
+        if x == env.LOC_LOCAL:
+            return task.cpu / ec.f_local
+
+        if 1 <= x <= env.E:
+            e = x - 1
+            return (task.data_in / avg_rate_ue
+                    + task.cpu / st.f_edge[e]              # ← 该边缘真实算力
+                    + task.data_out / ec.rate_eu)
+
+        # 云端：回程按"零队列 + 各回程带宽均值"估计
+        mean_rate_ec = float(np.mean(st.rate_ec_max))
+        r_ec = env._eff_ec_rate(0.0, mean_rate_ec)
+        return (task.data_in / avg_rate_ue
+                + task.data_in / r_ec
+                + task.cpu / ec.f_cloud
+                + task.data_out / ec.rate_ce
+                + task.data_out / ec.rate_eu)
+
     def select_action(self, obs: Dict, env: ThreeTierEnv) -> int:
         mask = obs["valid_mask"]
-        ec   = self.cfg.env
+        L = env.L
+        st = env.state
 
-        # 找下一个合法任务（按 rank 顺序）
         task_idx = None
         for ti in self._priority_order[self._priority_ptr:]:
-            if any(mask[ti * 3 + x] for x in range(3)):
+            if any(mask[ti * L + x] for x in range(L)):
                 task_idx = ti
                 self._priority_ptr = self._priority_order.index(ti) + 1
                 break
         if task_idx is None:
             return int(np.where(mask)[0][0])
 
-        # EFT 计算：用配置均值，不用 env.state 里的实时 Q_ec 和 rate_ue
-        avg_rate_ue = float(np.mean(list(ec.rate_ue_options)))
-        avg_r_ec    = env._eff_ec_rate(0.0)   # 假设无拥塞
-
-        best_action, best_eft = task_idx * 3, float("inf")
         task = env.dag.tasks[task_idx]
+        pred_ready = max((st.finish_times[p] for p in task.predecessors), default=0.0)
 
-        for x in range(3):
-            a = task_idx * 3 + x
+        best_action, best_eft = task_idx * L, float("inf")
+        for x in range(L):
+            a = task_idx * L + x
             if not mask[a]:
                 continue
-
-            if x == 0:   # local
-                exec_t = task.cpu / ec.f_local
-            elif x == 1: # edge
-                exec_t = (task.data_in  / avg_rate_ue
-                        + task.cpu      / ec.f_edge
-                        + task.data_out / ec.rate_eu)
-            else:        # cloud
-                exec_t = (task.data_in  / avg_rate_ue
-                        + task.data_in  / avg_r_ec
-                        + task.cpu      / ec.f_cloud
-                        + task.data_out / ec.rate_ce
-                        + task.data_out / ec.rate_eu)
-
-        pred_ready = 0.0
-        if task.predecessors:
-            pred_ready = max((env.state.finish_times[p] for p in task.predecessors))
-        node_ready = env.state.node_avail[x]
-        eft = max(pred_ready, node_ready) + exec_t
-        if eft < best_eft:
-            best_eft, best_action = eft, a
+            exec_t = self._heft_exec(task, x, env)
+            eft = max(pred_ready, st.node_avail[x]) + exec_t
+            if eft < best_eft:
+                best_eft, best_action = eft, a
 
         return best_action
 
     def _compute_priority(self, dag: DAG, env: ThreeTierEnv) -> List[int]:
-        """
-        弱版 HEFT rank 计算：使用配置均值而非 episode 精确参数，
-        与 DRLTO/MRLCO 的 HEFT baseline 实现保持一致。
-        """
+        """upward rank：L 个位置执行时延的平均（异构参数已在 _heft_exec 中生效）"""
         ec = self.cfg.env
         N = dag.N
         rank = np.zeros(N)
         avg_exec = np.zeros(N)
-
-        # 使用配置均值，不用 env.state 里的实时值
-        avg_rate_ue = float(np.mean(list(ec.rate_ue_options)))   # 11.0 MB/s
-        avg_q_ec = 0.0   # 假设无拥塞，与两层 HEFT 等价
-        avg_r_ec = env._eff_ec_rate(avg_q_ec)                    # 最大回程速率
+        avg_rate_ue = float(np.mean(list(ec.rate_ue_options)))
 
         for t in dag.tasks:
-            t_local = t.cpu / ec.f_local
-            t_edge  = (t.data_in  / avg_rate_ue
-                     + t.cpu      / ec.f_edge
-                     + t.data_out / ec.rate_eu)
-            t_cloud = (t.data_in  / avg_rate_ue
-                     + t.data_in  / avg_r_ec
-                     + t.cpu      / ec.f_cloud
-                     + t.data_out / ec.rate_ce
-                     + t.data_out / ec.rate_eu)
-            avg_exec[t.idx] = (t_local + t_edge + t_cloud) / 3.0
+            exec_list = [self._heft_exec(t, x, env) for x in range(env.L)]
+            avg_exec[t.idx] = float(np.mean(exec_list))
 
         topo = dag.topological_order()
         for v in reversed(topo):
@@ -240,8 +254,7 @@ class HEFTPolicy(BaselinePolicy):
                 rank[v] = avg_exec[v]
             else:
                 comm = task.data_out / avg_rate_ue
-                rank[v] = avg_exec[v] + max(comm + rank[s]
-                                            for s in task.successors)
+                rank[v] = avg_exec[v] + max(comm + rank[s] for s in task.successors)
         return list(np.argsort(-rank))
 
 
@@ -250,10 +263,6 @@ class HEFTPolicy(BaselinePolicy):
 # ─────────────────────────────────────────────────────────
 
 def run_all_baselines(dags: List[DAG], cfg: Config, seed: int = 42) -> List[Dict]:
-    """
-    在给定 DAG 列表上运行所有基线，返回统计结果列表
-    用于论文中的对比表格
-    """
     rng = np.random.default_rng(seed)
     env = ThreeTierEnv(cfg, rng)
 

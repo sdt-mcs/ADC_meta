@@ -1,6 +1,10 @@
 """
-ppo.py — PPO 更新器（支持 ADC 双截断）
+ppo.py — PPO 更新器（支持 ADC 双截断）— 多边缘版 / Multi-Edge
 对应数学文档 Section 5.3-5.5
+
+【多边缘改动（唯一功能性改动）】
+  * RolloutBuffer.to_tensors 中 valid_mask/ccsm_weights 的填充长度
+    从 3*max_N → L*max_N（L=E+2，由 obs["L"] 提供；缺省回退 3 兼容单边缘）
 """
 import torch
 import torch.nn as nn
@@ -64,6 +68,8 @@ class RolloutBuffer:
     def to_tensors(self, device: torch.device) -> Dict:
         """将缓冲区数据转为张量（用于 evaluate_actions 批量计算）"""
         max_N = max(o["N"] for o in self.obs_list)
+        # 多边缘：动作维度 L = E+2 由 obs 提供（缺省回退 3，兼容旧单边缘）
+        L = int(self.obs_list[0].get("L", 3))
 
         def pad_task_features(obs_list):
             arrays = []
@@ -74,14 +80,14 @@ class RolloutBuffer:
                 arrays.append(padded)
             return np.stack(arrays)   # [B, max_N, 7]
 
-        def pad_3n(obs_list, key, dtype=np.float32):
+        def pad_nl(obs_list, key, dtype=np.float32):
             arrays = []
             for obs in obs_list:
-                arr = obs[key]              # [3N]
-                padded = np.zeros(3 * max_N, dtype=dtype)
+                arr = obs[key]              # [N*L]
+                padded = np.zeros(L * max_N, dtype=dtype)
                 padded[:len(arr)] = arr
                 arrays.append(padded)
-            return np.stack(arrays)         # [B, 3*max_N]
+            return np.stack(arrays)         # [B, L*max_N]
 
         batch = {
             "task_features": torch.FloatTensor(pad_task_features(self.obs_list)).to(device),
@@ -89,10 +95,10 @@ class RolloutBuffer:
                 np.stack([o["global_features"] for o in self.obs_list])
             ).to(device),
             "valid_mask": torch.BoolTensor(
-                pad_3n(self.obs_list, "valid_mask", dtype=bool)
+                pad_nl(self.obs_list, "valid_mask", dtype=bool)
             ).to(device),
             "ccsm_weights": torch.FloatTensor(
-                pad_3n(self.obs_list, "ccsm_weights")
+                pad_nl(self.obs_list, "ccsm_weights")
             ).to(device),
             "N": max_N,
         }

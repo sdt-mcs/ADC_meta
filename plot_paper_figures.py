@@ -128,10 +128,11 @@ def plot_fig3_adaptation():
     rand_ms = [0.482, 0.593, 0.841, 0.856, 0.815, 0.792, 0.813]
 
     # ── 右面板数据 ──────────────────────────────────────
-    n_vals    = [10,    20,    30,    40,    50   ]
-    heft_n    = [0.106, 0.231, 0.338, 0.464, 0.573]
-    adc_k0_n  = [0.079, 0.164, 0.237, 0.320, 0.387]
-    adc_k2_n  = [0.108, 0.159, 0.217, 0.305, 0.361]
+    _byn      = json.load(open("results/eval_by_n.json"))
+    n_vals    = _byn["n_values"]
+    heft_n    = _byn["HEFT"]
+    adc_k0_n  = _byn["ADC_K0"]
+    adc_k2_n  = _byn["ADC_K2"]
 
     # 扁平化画布与紧凑间距
     fig = plt.figure(figsize=(3.5, 5.0))
@@ -189,13 +190,13 @@ def plot_fig3_adaptation():
              markerfacecolor="white")
 
     # 异常点高亮外圈
-    ax2.plot(10, 0.108, "o", markersize=8, markerfacecolor="none", 
+    ax2.plot(10, adc_k2_n[0], "o", markersize=8, markerfacecolor="none", 
              markeredgecolor="#d73027", markeredgewidth=1.2, zorder=5)
              
     # 右图异常点悬空标注
     ax2.annotate("data-scarce\nregime", 
-                 xy=(10.5, 0.125),    
-                 xytext=(14.5, 0.24), 
+                 xy=(10.6, adc_k2_n[0] + 0.012),    
+                 xytext=(15.0, 0.26),
                  arrowprops=dict(arrowstyle="->", color="#d73027", lw=0.9,
                                  connectionstyle="arc3,rad=0.15"), 
                  fontsize=6.5, color="#d73027", ha="center", va="center")
@@ -203,7 +204,7 @@ def plot_fig3_adaptation():
     ax2.set_xlabel("Number of subtasks $n$")
     ax2.set_ylabel("Mean Makespan (s)")
     ax2.set_xticks(n_vals)
-    ax2.set_ylim(0, 0.52)
+    ax2.set_ylim(0, 0.62)
     
     ax2.legend(loc="upper left", framealpha=0.85, fontsize=6.0)
     ax2.grid(True, which="major")

@@ -1,6 +1,11 @@
 """
-model.py — S2S 策略网络（含 CCSM 软掩码）
+model.py — S2S 策略网络（含 CCSM 软掩码）— 多边缘版 / Multi-Edge
 对应数学文档 Section 3-4
+
+【多边缘改动（唯一功能性改动）】
+  * feat_dim: 全局特征从 2 维 → E+1 维（E 条回程队列占用 + 1 信道）
+  * 动作位置数 n_locations = E+2 由 config 派生；本文件所有 view/head 均按
+    n_locations 参数化，无需额外改动（动作维度 L = n_locations = E+2）
 """
 import torch
 import torch.nn as nn
@@ -70,7 +75,7 @@ class AttentionDecoder(nn.Module):
         self.scale = hidden_dim ** 0.5
 
         # 输出层：logits（用于 1D 联合索引动作）
-        # 每个子任务 × n_locations 个动作
+        # 每个子任务 × n_locations 个动作（n_locations = E+2）
         self.W_o = nn.Linear(hidden_dim * 2, hidden_dim)
         self.actor_head = nn.Linear(hidden_dim, n_locations)  # 输出每个位置的 logit
         self.critic_head = nn.Linear(hidden_dim * 2, 1)       # 状态值函数
@@ -103,8 +108,6 @@ class AttentionDecoder(nn.Module):
         feat = F.relu(self.W_o(fused))                          # [B, 1, H]
 
         # 每个子任务的位置 logits：扩展到 [B, N, n_locations]
-        # 方式：用 feat 与每个子任务的 enc_output 再次计算位置得分
-        # 简化版：将 feat 广播后与 enc_outputs 拼接，分别计算每个子任务的 logits
         feat_expanded = feat.expand(-1, enc_outputs.shape[1], -1)  # [B, N, H]
         task_feat = enc_outputs + feat_expanded                     # [B, N, H]（残差融合）
         task_logits = self.actor_head(task_feat)                    # [B, N, n_locs]
@@ -124,10 +127,13 @@ class S2SPolicy(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
-        feat_dim = 7 + 2    # 子任务特征(7) + 全局特征(2) 拼入每个子任务
+        # 多边缘：全局特征 = E 条回程队列占用 + 1 信道 = E+1
+        E = getattr(cfg.env, "num_edges", 1)
+        L = E + 2
+        feat_dim = getattr(cfg.model, "feat_dim", 0) or ((7 + L) + (4 * E + 3))
         self.emb_dim = cfg.model.emb_dim
         self.hidden_dim = cfg.model.hidden_dim
-        self.n_locations = cfg.model.n_locations
+        self.n_locations = cfg.model.n_locations   # = E+2（由 Config.__post_init__ 派生）
 
         self.task_encoder = TaskEncoder(feat_dim, self.emb_dim)
         self.s2s_encoder = S2SEncoder(self.emb_dim, self.hidden_dim)
@@ -144,30 +150,30 @@ class S2SPolicy(nn.Module):
         """
         obs: 单步观测字典（来自 env._get_obs()）
         Returns:
-          log_probs: [3N]  — 对数概率（已掩码）
-          value: scalar    — 状态值
+          log_probs: [N*L]  — 对数概率（已掩码），L = E+2
+          value: scalar     — 状态值
         """
-        task_feats = torch.FloatTensor(obs["task_features"]).to(device)  # [N, 7]
-        global_feats = torch.FloatTensor(obs["global_features"]).to(device)  # [2]
-        valid_mask = torch.BoolTensor(obs["valid_mask"]).to(device)      # [3N]
-        ccsm_w = torch.FloatTensor(obs["ccsm_weights"]).to(device)       # [3N]
+        task_feats = torch.FloatTensor(obs["task_features"]).to(device)     # [N, 7]
+        global_feats = torch.FloatTensor(obs["global_features"]).to(device) # [E+1]
+        valid_mask = torch.BoolTensor(obs["valid_mask"]).to(device)         # [N*L]
+        ccsm_w = torch.FloatTensor(obs["ccsm_weights"]).to(device)          # [N*L]
         N = obs["N"]
 
         # 将全局特征拼接到每个子任务特征
-        global_expanded = global_feats.unsqueeze(0).expand(N, -1)       # [N, 2]
-        full_feats = torch.cat([task_feats, global_expanded], dim=-1)   # [N, 9]
+        global_expanded = global_feats.unsqueeze(0).expand(N, -1)          # [N, E+1]
+        full_feats = torch.cat([task_feats, global_expanded], dim=-1)      # [N, 7+E+1]
 
         # 编码
-        emb = self.task_encoder(full_feats.unsqueeze(0))                 # [1, N, emb]
-        enc_out, (h_n, c_n) = self.s2s_encoder(emb)                    # [1, N, H]
+        emb = self.task_encoder(full_feats.unsqueeze(0))                    # [1, N, emb]
+        enc_out, (h_n, c_n) = self.s2s_encoder(emb)                         # [1, N, H]
 
         # 解码（单步：当前调度决策）
-        prev_emb = self.start_token                                       # [1, 1, emb]
+        prev_emb = self.start_token                                         # [1, 1, emb]
         task_logits, value, _ = self.decoder(enc_out, (h_n, c_n), prev_emb)
         # task_logits: [1, N, n_locations]
 
-        # 展平为 1D 联合索引 [3N]
-        flat_logits = task_logits.squeeze(0).view(-1)                    # [3N]
+        # 展平为 1D 联合索引 [N*L]
+        flat_logits = task_logits.squeeze(0).view(-1)                       # [N*L]
 
         # ── CCSM 掩码（Section 3.2）──────────────────────────────────
         # 1. 软掩码：log(w_a) 加到 logits
@@ -177,7 +183,7 @@ class S2SPolicy(nn.Module):
         flat_logits = flat_logits.masked_fill(~valid_mask, float("-inf"))
 
         # 3. Softmax → log_probs
-        log_probs = F.log_softmax(flat_logits, dim=-1)                  # [3N]
+        log_probs = F.log_softmax(flat_logits, dim=-1)                     # [N*L]
 
         return log_probs, value.squeeze()
 
@@ -196,7 +202,6 @@ class S2SPolicy(nn.Module):
             valid_mask = torch.BoolTensor(obs["valid_mask"]).to(device)
 
             # 仅在合法动作上采样，保持与 forward 计算一致
-            # 将 -inf 位置替换为极小值以便 softmax 数值稳定
             sample_logits = log_probs.clone()
             sample_logits[~valid_mask] = -1e9
             probs = torch.softmax(sample_logits, dim=-1)
@@ -230,14 +235,14 @@ class S2SPolicy(nn.Module):
         Returns: log_probs [B], values [B], entropy [B]
         """
         task_feats = obs_batch["task_features"].to(device)      # [B, N, 7]
-        global_feats = obs_batch["global_features"].to(device)  # [B, 2]
-        valid_masks = obs_batch["valid_mask"].to(device)        # [B, 3N]
-        ccsm_ws = obs_batch["ccsm_weights"].to(device)          # [B, 3N]
+        global_feats = obs_batch["global_features"].to(device)  # [B, E+1]
+        valid_masks = obs_batch["valid_mask"].to(device)        # [B, N*L]
+        ccsm_ws = obs_batch["ccsm_weights"].to(device)          # [B, N*L]
         B, N, _ = task_feats.shape
 
         # 拼接全局特征
-        global_exp = global_feats.unsqueeze(1).expand(-1, N, -1)         # [B, N, 2]
-        full_feats = torch.cat([task_feats, global_exp], dim=-1)         # [B, N, 9]
+        global_exp = global_feats.unsqueeze(1).expand(-1, N, -1)         # [B, N, E+1]
+        full_feats = torch.cat([task_feats, global_exp], dim=-1)         # [B, N, 7+E+1]
 
         # 批量编码
         emb = self.task_encoder(full_feats)                               # [B, N, emb]
@@ -246,22 +251,19 @@ class S2SPolicy(nn.Module):
         # 批量解码
         start = self.start_token.expand(B, -1, -1)
         task_logits, values, _ = self.decoder(enc_out, (h_n, c_n), start)
-        flat_logits = task_logits.view(B, -1)                            # [B, 3N]
+        flat_logits = task_logits.view(B, -1)                            # [B, N*L]
 
         # CCSM 掩码
         flat_logits = flat_logits + torch.log(ccsm_ws + 1e-10)
         flat_logits = flat_logits.masked_fill(~valid_masks, float("-inf"))
 
-        log_probs_all = F.log_softmax(flat_logits, dim=-1)               # [B, 3N]
+        log_probs_all = F.log_softmax(flat_logits, dim=-1)               # [B, N*L]
 
         # 取对应动作的 log_prob
         log_probs = log_probs_all.gather(1, actions.unsqueeze(1)).squeeze(1)  # [B]
 
         # 策略熵：避免 0 * (-inf) = NaN 的 IEEE 陷阱
-        # 方法：仅在合法动作上计算熵，屏蔽位置贡献为 0
         probs = log_probs_all.exp()                                      # -inf → 0
-        # nan_to_num 处理残余 NaN（-inf * 0 可能产生 NaN）
-        # 改后：用 where 彻底切断 masked 位置的梯度路径
         log_p = torch.where(valid_masks, log_probs_all, torch.zeros_like(log_probs_all))
         p = torch.where(valid_masks, probs, torch.zeros_like(probs))
         entropy = -(p * log_p).sum(dim=-1)                          # [B]
